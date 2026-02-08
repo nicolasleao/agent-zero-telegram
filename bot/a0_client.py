@@ -148,6 +148,7 @@ class A0Client:
             Dict with "context_id" and "response" keys.
         """
         payload: dict[str, Any] = {
+            "message": message,
             "text": message,
             "attachments": attachments or [],
         }
