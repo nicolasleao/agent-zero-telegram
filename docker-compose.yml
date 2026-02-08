@@ -1,0 +1,51 @@
+# T-22: Docker Compose for Agent Zero Telegram Bot
+# Usage: docker-compose up -d
+
+version: "3.8"
+
+services:
+  telegram-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: agent-zero-telegram-bot
+    restart: unless-stopped
+
+    # Volume mounts:
+    # - config.json: Read-only configuration (mounted from host)
+    # - data/: Persistent state storage (pending verifications, auto_context_id)
+    volumes:
+      - ./config.json:/app/config.json:ro
+      - ./data/:/data/
+
+    # Environment variables (optional overrides)
+    environment:
+      - PYTHONUNBUFFERED=1
+      - STATE_FILE=/data/state.json
+
+    # Connect to Agent Zero's network
+    # This assumes A0 is running on a network named 'a0-network'
+    networks:
+      - a0-network
+
+    # Optional: Wait for A0 to be ready (if running together)
+    # Remove 'depends_on' if A0 is managed separately
+    # depends_on:
+    #   - agent-zero
+
+    # Health check to monitor bot status
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys; sys.exit(0)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+# Use external network shared with Agent Zero
+# Create it first with: docker network create a0-network
+networks:
+  a0-network:
+    external: true
+    # If you prefer to create the network in this compose file instead:
+    # external: false
+    # name: a0-network

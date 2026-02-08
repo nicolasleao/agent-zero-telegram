@@ -41,12 +41,13 @@ class BotState(BaseModel):
     """Top-level bot state persisted to disk."""
     pending_verifications: dict[str, PendingVerification] = Field(default_factory=dict)
     users: dict[int, UserState] = Field(default_factory=dict)
+    auto_context_id: str | None = None  # Persisted when fixed_context_id not configured
 
 
 class StateManager:
     """Manages bot state with automatic JSON file persistence.
 
-    Every mutation method auto-saves to disk using atomic writes.
+    Every mutation method auto-saves to disk.
     """
 
     def __init__(self, path: str | Path) -> None:
@@ -107,6 +108,30 @@ class StateManager:
             except OSError:
                 pass
             raise
+
+    # ------------------------------------------------------------------
+    # Auto Context ID (for static configuration mode)
+    # ------------------------------------------------------------------
+
+    def set_auto_context_id(self, context_id: str) -> None:
+        """Set the auto-created context ID when fixed_context_id is not configured.
+
+        Args:
+            context_id: The A0 context ID to persist.
+        """
+        self._state.auto_context_id = context_id
+        self.save()
+        logger.info("Set auto_context_id: %s", context_id)
+
+    def get_auto_context_id(self) -> str | None:
+        """Get the persisted auto-created context ID."""
+        return self._state.auto_context_id
+
+    def clear_auto_context_id(self) -> None:
+        """Clear the auto-created context ID."""
+        self._state.auto_context_id = None
+        self.save()
+        logger.info("Cleared auto_context_id")
 
     # ------------------------------------------------------------------
     # Pending Verifications

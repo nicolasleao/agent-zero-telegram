@@ -27,7 +27,9 @@ class AgentZeroConfig(BaseModel):
     host: str = "http://agent-zero"
     port: int = 80
     api_key: str
-    default_project: str | None = None
+    default_project: str | None = None  # Deprecated: use fixed_project_name
+    fixed_project_name: str | None = None  # All messages go to this project
+    fixed_context_id: str | None = None  # If set, use this context; else auto-create
     timeout_seconds: int = 300
     lifetime_hours: int = 24
 

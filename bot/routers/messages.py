@@ -1,7 +1,6 @@
 """Message handler: relay user text to Agent Zero and return formatted responses."""
 
 import logging
-import re
 
 from aiogram import Router, F
 from aiogram.enums import ParseMode
@@ -21,7 +20,6 @@ from bot.state import StateManager
 logger = logging.getLogger(__name__)
 
 router = Router(name="messages")
-
 
 
 async def _send_chunk(
@@ -77,6 +75,11 @@ async def handle_message(
 
     Forwards the user's message to Agent Zero, formats the response,
     and sends it back as Telegram HTML.
+
+    Uses static configuration:
+    - fixed_project_name from config (all messages go to this project)
+    - fixed_context_id from config, or auto_context_id from state,
+      or None (A0 creates new context)
     """
     user = message.from_user
     user_id = user.id if user else 0
@@ -88,61 +91,74 @@ async def handle_message(
         message.text[:80] if message.text else "<empty>",
     )
 
-    # Look up user's current context
-    user_state = state_manager.get_user(user_id)
-    context_id = user_state.context_id if user_state else None
-    project = user_state.project if user_state else None
+    # Determine project_name from fixed config
+    # Priority: fixed_project_name > default_project (deprecated) > None
+    project_name = config.agent_zero.fixed_project_name
+    if project_name is None:
+        project_name = config.agent_zero.default_project
 
-    # Use default project from config if user has no project set
-    if not project:
-        project = config.agent_zero.default_project
+    # Determine context_id (priority order):
+    # 1. Use fixed_context_id from config if set
+    # 2. Use auto_context_id from state (persisted when fixed_context_id not configured)
+    # 3. If both None, send None to A0 (it will create new)
+    context_id = config.agent_zero.fixed_context_id
+    if context_id is None:
+        context_id = state_manager.get_auto_context_id()
+
+    logger.info(
+        "Relaying message to A0 (project=%s, context=%s)",
+        project_name or "<default>",
+        context_id or "<auto>",
+    )
 
     # Send processing indicator
-    processing_msg = await message.answer("\u23f3 Processing...")
+    processing_msg = await message.answer("⏳ Processing...")
 
     # Call Agent Zero
     try:
         result = await a0_client.send_message(
             message=message.text,
             context_id=context_id,
-            project_name=project,
+            project_name=project_name,
         )
     except A0ConnectionError:
         logger.error("A0 connection error for user %d", user_id)
         await processing_msg.edit_text(
-            "\u26a0\ufe0f Agent Zero is not reachable. Is it running?"
+            "⚠️ Agent Zero is not reachable. Is it running?"
         )
         return
     except A0TimeoutError:
         logger.error("A0 timeout for user %d", user_id)
         await processing_msg.edit_text(
-            "\u23f0 Request timed out. Agent Zero may still be processing."
+            "⏰ Request timed out. Agent Zero may still be processing."
         )
         return
     except A0APIError as e:
         logger.error("A0 API error for user %d: %s", user_id, e)
         await processing_msg.edit_text(
-            "\u26a0\ufe0f Agent Zero returned an error. Please try again."
+            "⚠️ Agent Zero returned an error. Please try again."
         )
         return
 
-    # Store context if new or changed
-    returned_context = result["context_id"]
-    if returned_context and returned_context != context_id:
-        state_manager.set_user_context(user_id, returned_context, project)
-        # Add to chat registry if this is a new chat
-        state_manager.add_chat(user_id, returned_context, project)
+    # If A0 returned a new context_id (when we sent None), save it
+    returned_context = result.get("context_id")
+    if (
+        config.agent_zero.fixed_context_id is None
+        and state_manager.get_auto_context_id() is None
+        and returned_context
+    ):
+        state_manager.set_auto_context_id(returned_context)
         logger.info(
-            "New context for user %d: %s (project: %s)",
-            user_id, returned_context, project,
+            "Auto-created and persisted context_id: %s",
+            returned_context,
         )
 
     # Format the response
-    response_text = result["response"]
+    response_text = result.get("response", "")
 
     if not response_text or not response_text.strip():
         await processing_msg.edit_text(
-            "\u2705 Task completed (no text response)."
+            "✅ Task completed (no text response)."
         )
         return
 
@@ -150,7 +166,7 @@ async def handle_message(
 
     if not chunks:
         await processing_msg.edit_text(
-            "\u2705 Task completed (no text response)."
+            "✅ Task completed (no text response)."
         )
         return
 

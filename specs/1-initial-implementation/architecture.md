@@ -1,270 +1,104 @@
-# Architecture — Agent Zero Telegram Bot
+# Technical Architecture — Agent Zero Telegram Bot
 
-> **Version**: 1.0 — Initial Implementation  
-> **Date**: 2025-02-07  
-> **Status**: Approved for implementation
+> **Version**: 2.0 — Simplified Static Config Architecture  
+> **Date**: 2026-02-07  
+> **Status**: Updated for Static Configuration Model
 
----
-
-## Table of Contents
-
-1. [System Overview](#1-system-overview)
-2. [Technology Choices](#2-technology-choices)
-3. [Component Breakdown](#3-component-breakdown)
-4. [Data Flow](#4-data-flow)
-5. [Directory Structure](#5-directory-structure)
-6. [Configuration Schema](#6-configuration-schema)
-7. [State Management](#7-state-management)
-8. [Docker Deployment](#8-docker-deployment)
-9. [Error Handling Strategy](#9-error-handling-strategy)
-10. [Security Considerations](#10-security-considerations)
+This document describes the internal architecture of the Agent Zero Telegram Bot. It covers components, data flow, API interactions, and design patterns.
 
 ---
 
-## 1. System Overview
+## 1. High-Level Architecture
 
-The Agent Zero Telegram Bot is a standalone Python service that bridges Telegram messaging with a running Agent Zero (A0) instance. Users interact with A0 through Telegram commands and natural language messages. The bot runs in its own Docker container alongside A0 on the same Docker network.
+### 1.1 Design Philosophy
 
-### High-Level Architecture
+This bot follows a **minimal state, maximum simplicity** philosophy:
+
+- **One bot = one project = one context**: No dynamic switching, no per-user state complexity
+- **Static configuration**: Project and context are set in `config.json` at deployment time
+- **Shared context**: All approved users collaborate in the same A0 conversation
+- **Stateless where possible**: Only runtime state (pending verifications) and auto-created context_id are persisted
+
+### 1.2 System Context
 
 ```
-┌──────────────┐         Telegram Bot API          ┌───────────────────┐
-│  User Phone  │ ◄──────────────────────────────► │  Telegram Servers  │
-│  (Telegram)  │        HTTPS (managed by TG)      └─────────┬─────────┘
-└──────────────┘                                             │
-                                                             │ Long Polling
-                                                             │ (outbound HTTPS)
-                                                             ▼
-┌────────────────────────────────────────────────────────────────────────┐
-│                        Docker Network: a0-network                      │
-│                                                                        │
-│  ┌─────────────────────────────────┐    HTTP POST     ┌─────────────┐ │
-│  │  a0-telegram-bot                │ ──────────────► │  agent-zero  │ │
-│  │  ┌───────────────────────────┐  │  /api_message    │              │ │
-│  │  │ aiogram 3.x (polling)    │  │  /api_reset_chat │  Port 80     │ │
-│  │  │ Auth Middleware           │  │  /api_terminate  │  (internal)  │ │
-│  │  │ A0 Client (aiohttp)      │  │  X-API-KEY auth  │              │ │
-│  │  │ State Manager             │  │ ◄────────────── │              │ │
-│  │  │ Config Manager            │  │  JSON responses  └─────────────┘ │
-│  │  └───────────────────────────┘  │                                   │
-│  │  Volumes:                       │                                   │
-│  │   /app/config.json (bind mount) │                                   │
-│  │   /data/ (named volume)         │                                   │
-│  └─────────────────────────────────┘                                   │
-└────────────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────┐
+│                           Docker Network: a0-network                       │
+│                                                                          │
+│  ┌─────────────────────┐         HTTP REST         ┌──────────────────┐  │
+│  │   Telegram Bot      │  ═══════════════════════► │   Agent Zero     │  │
+│  │   (this service)    │    POST /api_message      │   (existing)     │  │
+│  │                     │    POST /api_reset_chat   │                  │  │
+│  │                     │    POST /api_terminate_chat │                  │  │
+│  └─────────────────────┘                           └──────────────────┘  │
+│           │                                                              │
+│           │ Long Polling (outbound only)                                 │
+│           ▼                                                              │
+│  ┌─────────────────────┐                                                 │
+│  │   Telegram API      │                                                 │
+│  │   (external)        │                                                 │
+│  └─────────────────────┘                                                 │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
 ```
 
-### Key Architectural Decisions
+### 1.3 Component Overview
 
-| Decision | Choice | Rationale |
-|----------|--------|-----------|
-| Framework | aiogram 3.x | Native async, middleware support, FSM, active development |
-| Polling vs Webhooks | Long polling | No inbound ports needed, simpler Docker setup, no TLS config |
-| A0 communication | HTTP REST via aiohttp | Only API-key-authenticated endpoints used; no web auth dependency |
-| Auth model | First-time code verification + CLI approval | Server-level security; no Telegram admin commands that could be spoofed |
-| State persistence | Local JSON file | Simple, no database dependency for a single-user/small-user bot |
-| Config persistence | Single config.json | Bind-mounted; editable from host; holds both secrets and approved users |
-| Deployment | Separate container, same network | Clean separation; independent lifecycle; Docker best practice |
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                         Telegram Bot Container                        │
+│                                                                      │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  ┌──────────┐  │
+│  │    Config    │  │     State    │  │   Telegram   │  │   A0     │  │
+│  │   Manager    │  │   Manager    │  │    Client    │  │  Client  │  │
+│  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘  └────┬─────┘  │
+│         │                 │                 │               │        │
+│         └────────────────┴─────────────────┴───────────────┘        │
+│                            │                                        │
+│                            ▼                                        │
+│                  ┌──────────────────┐                              │
+│                  │  Bot Application   │                              │
+│                  │    (aiogram)     │                              │
+│                  └────────┬─────────┘                              │
+│                           │                                         │
+│           ┌───────────────┼───────────────┐                        │
+│           ▼               ▼               ▼                        │
+│  ┌────────────────┐ ┌────────────┐ ┌──────────────┐              │
+│  │ Auth Middleware│ │  Commands  │ │   Messages   │              │
+│  │   (outer)      │ │  Router    │ │   Router     │              │
+│  └────────────────┘ └────────────┘ └──────────────┘              │
+│                                                                      │
+│  ┌──────────────────────────────────────────────────────────────┐     │
+│  │  CLI Tool (admin approval, separate entry point)           │     │
+│  └──────────────────────────────────────────────────────────────┘     │
+│                                                                      │
+└─────────────────────────────────────────────────────────────────────┘
+```
 
 ---
 
-## 2. Technology Choices
+## 2. Components
 
-### Runtime & Language
+### 2.1 Configuration (`bot/config.py`)
 
-| Component | Choice | Version |
-|-----------|--------|---------|
-| Language | Python | 3.12+ |
-| Base image | `python:3.12-slim` | Minimal footprint |
-| Package manager | pip | Standard |
+**Purpose**: Type-safe configuration management using Pydantic.
 
-### Dependencies
-
-| Package | Purpose | Version |
-|---------|---------|--------|
-| `aiogram` | Telegram Bot framework (async, routers, middleware) | ≥3.15 |
-| `aiohttp` | Async HTTP client for A0 API calls | ≥3.9 |
-| `pydantic` | Config and state schema validation | ≥2.0 |
-
-**Why these and nothing else:**
-- `aiogram` bundles `aiohttp` internally, so we get the HTTP client for free.
-- `pydantic` gives us typed config/state models with validation and JSON serialization — prevents config typos from causing runtime errors.
-- No database driver, no Redis, no ORM. This is a small bot — JSON files are sufficient.
-
----
-
-## 3. Component Breakdown
-
-### Component Diagram
-
-```
-┌─────────────────────────────────────────────────────────┐
-│                      bot package                         │
-│                                                          │
-│  ┌──────────┐   ┌──────────────┐   ┌─────────────────┐  │
-│  │  main.py │──►│  Bot Core    │──►│  Routers        │  │
-│  │ (entry)  │   │  (Dispatcher │   │  ├─ commands.py  │  │
-│  └──────────┘   │   + Bot)     │   │  └─ messages.py  │  │
-│                  └──────┬───────┘   └────────┬────────┘  │
-│                         │                    │           │
-│                         ▼                    ▼           │
-│                  ┌──────────────┐   ┌─────────────────┐  │
-│                  │  Middleware   │   │  A0 Client      │  │
-│                  │  └─ auth.py  │   │  (aiohttp)      │  │
-│                  └──────┬───────┘   └────────┬────────┘  │
-│                         │                    │           │
-│                         ▼                    │           │
-│                  ┌──────────────┐             │           │
-│                  │  Config Mgr  │◄────────────┘           │
-│                  │  (Pydantic)  │                         │
-│                  └──────┬───────┘                         │
-│                         │                                │
-│                         ▼                                │
-│                  ┌──────────────┐                         │
-│                  │  State Mgr   │                         │
-│                  │  (JSON file) │                         │
-│                  └──────────────┘                         │
-│                                                          │
-│  ┌──────────┐                                            │
-│  │  cli.py  │  (standalone CLI — runs outside bot loop)  │
-│  └──────────┘                                            │
-└─────────────────────────────────────────────────────────┘
-```
-
-### 3.1 Bot Core (`main.py`)
-
-**Responsibility**: Application entry point. Wires everything together and starts polling.
-
-**Behavior**:
-1. Load config from `config.json`
-2. Initialize `Bot` and `Dispatcher` (aiogram)
-3. Create `A0Client` instance (shared aiohttp session)
-4. Register middleware (auth)
-5. Include routers (commands, messages)
-6. Start long polling
-7. On shutdown: close aiohttp session, flush state
-
-**Key detail**: The `A0Client` and `ConfigManager` instances are injected into handlers via aiogram's built-in dependency injection (`workflow_data` on the Dispatcher).
-
-### 3.2 Auth Middleware (`middleware/auth.py`)
-
-**Responsibility**: Gate every incoming Telegram update. Only approved users reach handlers.
-
-**Type**: aiogram outer middleware on the `Message` update type.
-
-**Behavior**:
-- Extract `sender_id` from the incoming message
-- If `sender_id` is in `config.approved_users` → pass through to handler
-- If `sender_id` has a pending verification → silently drop (do nothing)
-- If `sender_id` is unknown:
-  1. Generate a 6-character alphanumeric code (`secrets.token_hex(3)` → 6 hex chars)
-  2. Store `{code: {user_id, username, timestamp}}` in state file under `pending_verifications`
-  3. Send Telegram message: "Your verification code is: `XXXXXX`. Ask the admin to run: `approve XXXXXX`"
-  4. Drop the update (do not pass to handler)
-
-**Rate limiting**: Max 1 code per user per 60 seconds. If a code already exists and hasn't expired, silently drop.
-
-**Code expiry**: 10 minutes. Expired codes are cleaned up lazily on next access.
-
-### 3.3 A0 Client (`a0_client.py`)
-
-**Responsibility**: Async HTTP client wrapping all Agent Zero API calls.
-
-**Interface**:
-
-```python
-class A0Client:
-    async def send_message(
-        message: str,
-        context_id: str = "",
-        project_name: str | None = None,
-        attachments: list[dict] | None = None,
-    ) -> A0Response  # {context_id: str, response: str}
-
-    async def reset_chat(context_id: str) -> None
-    async def terminate_chat(context_id: str) -> None
-    async def close() -> None  # cleanup session
-```
-
-**Implementation details**:
-- Single `aiohttp.ClientSession` created on first use, reused for all requests
-- `X-API-KEY` header set on the session (applies to all requests)
-- Timeout: configurable, default 300s (5 minutes) — A0 responses are synchronous and can be slow
-- All methods raise typed exceptions (`A0ConnectionError`, `A0APIError`, `A0TimeoutError`)
-
-### 3.4 Routers
-
-#### `routers/commands.py` — Command Handlers
-
-| Command | Handler | Behavior |
-|---------|---------|----------|
-| `/start` | `cmd_start` | Welcome message. If no active context, create one via A0. |
-| `/new [project]` | `cmd_new` | Create new A0 chat. Optional project name. Store new context_id in state. |
-| `/reset` | `cmd_reset` | Reset current chat history via `/api_reset_chat`. |
-| `/delete` | `cmd_delete` | Terminate current chat via `/api_terminate_chat`. Clear from state. |
-| `/status` | `cmd_status` | Show current context_id, active project, user info. |
-| `/help` | `cmd_help` | List all commands with descriptions. |
-
-#### `routers/messages.py` — Message Handler
-
-**Catches**: All non-command text messages from approved users.
-
-**Flow**:
-1. Look up user's current `context_id` from state
-2. If no context exists, auto-create one (send with empty `context_id`)
-3. Send "⏳ Processing..." reply immediately
-4. Call `a0_client.send_message(text, context_id)`
-5. Format A0's response for Telegram
-6. Edit the "Processing..." message with the actual response
-7. If response exceeds 4096 chars, split into multiple messages
-
-### 3.5 CLI Tool (`cli.py`)
-
-**Responsibility**: Admin command-line interface for user approval. Runs as a standalone script, not inside the bot's event loop.
-
-**Commands**:
-
-```bash
-# Approve a pending user by verification code
-python -m bot.cli approve <CODE>
-
-# List all pending verifications
-python -m bot.cli pending
-
-# List all approved users
-python -m bot.cli users
-
-# Revoke an approved user by Telegram user ID
-python -m bot.cli revoke <USER_ID>
-```
-
-**Implementation**:
-- Uses `argparse` for CLI parsing
-- Reads/writes `config.json` directly (for approved_users)
-- Reads/writes state file directly (for pending_verifications)
-- For the `approve` command: optionally sends a Telegram notification to the user via the Bot API (requires `bot_token` from config — uses a one-shot synchronous HTTP call or a small async helper)
-
-**Important**: The CLI operates on the same `config.json` and state file as the running bot. The bot watches/reloads config on change (or the CLI triggers a reload signal). Simplest approach: the bot re-reads `config.json` on every auth check (file is tiny, I/O is negligible).
-
-### 3.6 Config Manager (`config.py`)
-
-**Responsibility**: Load, validate, and provide access to configuration.
-
-**Implementation**: Pydantic models that load from and save to `config.json`.
+**Key Classes**:
 
 ```python
 class TelegramConfig(BaseModel):
     bot_token: str
-    approved_users: list[int] = []
+    approved_users: list[int] = Field(default_factory=list)
     parse_mode: str = "HTML"
 
 class AgentZeroConfig(BaseModel):
     host: str = "http://agent-zero"
     port: int = 80
     api_key: str
-    default_project: str | None = None
     timeout_seconds: int = 300
-    lifetime_hours: int = 24
+    # SIMPLIFIED: Static configuration fields
+    fixed_project_name: str | None = None  # All messages go to this project
+    fixed_context_id: str | None = None    # If set, use this context; else auto-create
 
 class BotConfig(BaseModel):
     telegram: TelegramConfig
@@ -272,459 +106,585 @@ class BotConfig(BaseModel):
     state_file: str = "/data/state.json"
 ```
 
-**Key behaviors**:
-- `load(path) -> BotConfig`: Read and validate config.json
-- `save(path)`: Write current config back (used by CLI to persist approved users)
-- The bot re-reads `approved_users` from disk on every auth middleware call (cheap for a small file, ensures CLI changes are picked up immediately without restart)
+**Behavior**:
+- Config is loaded once at startup and validated
+- `approved_users` is re-read from disk on every auth check (hot reload)
+- Atomic writes when CLI tool modifies config
+- Excludes computed fields (like `base_url`) from serialization
 
-### 3.7 State Manager (`state.py`)
+### 2.2 State Management (`bot/state.py`)
 
-**Responsibility**: Track runtime state that must survive restarts.
+**Purpose**: Persist runtime state that doesn't belong in config.
 
-**Schema**:
+**Key Class**:
 
 ```python
-class PendingVerification(BaseModel):
-    user_id: int
-    username: str | None = None
-    code: str
-    created_at: datetime
-
-class UserState(BaseModel):
-    context_id: str | None = None
-    project: str | None = None
-
 class BotState(BaseModel):
-    pending_verifications: dict[str, PendingVerification] = {}  # code -> verification
-    users: dict[int, UserState] = {}  # telegram_user_id -> state
+    # Pending verifications (expiring codes waiting for admin approval)
+    pending_verifications: dict[str, PendingVerification] = Field(default_factory=dict)
+    # Auto-created context (persisted across restarts)
+    auto_context_id: str | None = None  # Set when fixed_context_id not configured
+    # Version for migrations
+    version: int = 1
 ```
 
-**Persistence**: JSON file at the path specified by `config.state_file` (default `/data/state.json`).
+**Design Notes**:
+- **No per-user contexts**: All users share one `auto_context_id`
+- **No per-user chat registry**: Not needed with static configuration
+- Atomic writes using temp file + `os.replace()`
+- Lazy cleanup of expired verifications on access
 
-**Write strategy**: Write-on-change with atomic file replacement (`write to tmp + rename`). No periodic flush needed — state changes are infrequent.
+### 2.3 Authentication Middleware (`bot/middleware/auth.py`)
 
-### 3.8 Response Formatter (`formatters.py`)
+**Purpose**: Gate all message handlers behind approval check.
 
-**Responsibility**: Convert A0's markdown responses into Telegram-safe HTML.
+**Flow**:
 
-**Challenges**:
-- A0 outputs full Markdown (headers, tables, code blocks, bold, italic, links, LaTeX)
-- Telegram's HTML mode supports: `<b>`, `<i>`, `<code>`, `<pre>`, `<a>`, `<blockquote>`
-- Telegram message limit: 4096 characters
+```
+Incoming Update
+      │
+      ▼
+┌─────────────┐
+│  Outer      │  <-- Middleware runs BEFORE router dispatch
+│ Middleware  │
+└──────┬──────┘
+       │
+       ▼
+┌─────────────────┐
+│ Known user?     │
+│ (in approved)   │
+└──────┬──────────┘
+       │
+   ┌───┴───┐
+   │       │
+  Yes     No
+   │       │
+   ▼       ▼
+┌──────┐ ┌──────────────────┐
+│ Pass │ │ Send code + drop │
+│ thru │ │ (no handler)     │
+└──────┘ └──────────────────┘
+```
 
-**Strategy**:
-1. Convert Markdown → Telegram HTML (lightweight conversion, not a full parser)
+**Key Features**:
+- Outer middleware (runs on raw updates before routing)
+- Hot reload: re-reads `approved_users` from config.json on every check
+- Rate limiting: 1 code per user per 60 seconds
+- Silent drop: unapproved users get one code message, then silence
+
+### 2.4 A0 HTTP Client (`bot/a0_client.py`)
+
+**Purpose**: Async HTTP client for Agent Zero API.
+
+**Key Methods**:
+
+```python
+async def send_message(
+    self,
+    content: str,
+    context_id: str | None,      # Uses auto_context_id or fixed_context_id
+    project_name: str | None,    # Uses fixed_project_name from config
+) -> str:
+    """Send message to A0, return context_id (new or existing)."""
+
+async def reset_chat(self, context_id: str) -> None:
+    """Reset the specified A0 context."""
+
+async def terminate_chat(self, context_id: str) -> None:
+    """Terminate the specified A0 context."""
+```
+
+**Error Handling**:
+- Custom exception hierarchy: `A0Error` → `A0ConnectionError`, `A0TimeoutError`, `A0APIError`
+- Maps `asyncio.TimeoutError` → `A0TimeoutError`
+- Maps `aiohttp.ClientError` → `A0ConnectionError`
+- Non-2xx status codes → `A0APIError`
+
+### 2.5 Message Router (`bot/routers/messages.py`)
+
+**Purpose**: Handle incoming text messages from approved users.
+
+**Simplified Flow** (static config):
+
+```
+User Message
+    │
+    ▼
+┌─────────────────┐
+│ Send "⏳"       │
+│ indicator       │
+└────────┬────────┘
+         │
+         ▼
+┌─────────────────┐
+│ Determine       │
+│ context_id:     │
+│ 1. fixed_context_id from config? Use it
+│ 2. auto_context_id from state? Use it
+│ 3. Else: send None (A0 creates new)
+└────────┬────────┘
+         │
+         ▼
+┌─────────────────┐
+│ POST /api_message
+│ with:           │
+│ - content       │
+│ - context_id    │
+│ - project_name  │ (from fixed_project_name)
+└────────┬────────┘
+         │
+         ▼
+┌─────────────────┐
+│ If new context  │
+│ returned: save  │
+│ to state.json   │
+└────────┬────────┘
+         │
+         ▼
+┌─────────────────┐
+│ Format & send   │
+│ response        │
+└─────────────────┘
+```
+
+### 2.6 Commands Router (`bot/routers/commands.py`)
+
+**Purpose**: Handle Telegram bot commands.
+
+**Simplified Command Set**:
+
+| Command | Purpose | Who Can Use |
+|---------|---------|-------------|
+| `/start` | Welcome message + project info | Approved only |
+| `/help` | List available commands | Approved only |
+| `/status` | Show config: project, context, connection | Approved only |
+
+**Removed Commands** (from original design):
+- `/new` — not needed, context auto-created or fixed in config
+- `/chats` — not applicable with single shared context
+- `/projects` — not applicable with fixed project
+- `/reset` — user can type "reset" in chat, A0 handles it
+- `/delete` — not applicable with single context
+- `/exit` — not applicable
+
+### 2.7 Response Formatter (`bot/formatters.py`)
+
+**Purpose**: Convert A0's markdown to Telegram HTML.
+
+**Pipeline**:
+
+1. **Extract** fenced code blocks → placeholders
+2. **Extract** tables → placeholders (degraded to plain text)
+3. **Extract** inline code `` `code` `` → placeholders
+4. **Escape** remaining HTML special characters
+5. **Convert** Markdown → HTML:
+   - `# Header` → `<b>Header</b>`
    - `**bold**` → `<b>bold</b>`
-   - `` `code` `` → `<code>code</code>`
-   - Code blocks → `<pre>code</pre>`
-   - `# Headers` → `<b>Header</b>` (Telegram has no header tag)
-   - Links → `<a href="...">text</a>`
-   - Strip unsupported elements (tables → plain text, LaTeX → raw text)
-2. Split messages at 4096-char boundaries, preferring splits at paragraph breaks
-3. If a single code block exceeds the limit, send it as a document/file
+   - `*italic*` / `_italic_` → `<i>italic</i>`
+   - `[text](url)` → `<a href="url">text</a>`
+   - `> quote` → `<blockquote>quote</blockquote>`
+6. **Restore** placeholders with `<pre><code>` or `<code>` wrapping
+7. **Split** at 4096 characters, respecting block boundaries
+
+### 2.8 CLI Tool (`bot/cli.py`)
+
+**Purpose**: Admin commands for user management.
+
+**Entry Point**: `python -m bot.cli <command>`
+
+**Commands**:
+
+| Command | Description |
+|---------|-------------|
+| `approve <CODE>` | Approve pending user by verification code |
+| `pending` | List all pending verifications |
+| `users` | List all approved user IDs |
+| `revoke <USER_ID>` | Remove user from approved list |
+
+**Implementation Notes**:
+- Runs standalone (no aiogram event loop)
+- Creates temporary `Bot` instance to send approval notification
+- Modifies `config.json` directly (atomic write)
+- Changes take effect immediately (no bot restart needed)
 
 ---
 
-## 4. Data Flow
+## 3. Data Flow
 
-### 4.1 Message Flow (Happy Path)
-
-```
-User (Telegram)          Bot                          Agent Zero
-     │                    │                                │
-     │  "Summarize X"     │                                │
-     │───────────────────►│                                │
-     │                    │  [Auth middleware: approved ✓]  │
-     │                    │                                │
-     │  "⏳ Processing..." │                                │
-     │◄───────────────────│                                │
-     │                    │  POST /api_message             │
-     │                    │  {context_id, message}         │
-     │                    │───────────────────────────────►│
-     │                    │                                │
-     │                    │        (A0 processes...        │
-     │                    │         may take minutes)      │
-     │                    │                                │
-     │                    │  {context_id, response}        │
-     │                    │◄───────────────────────────────│
-     │                    │                                │
-     │                    │  [Format response for TG]      │
-     │                    │                                │
-     │  [Edit message:    │                                │
-     │   formatted reply] │                                │
-     │◄───────────────────│                                │
-     │                    │                                │
-```
-
-### 4.2 Authentication Flow (New User)
+### 3.1 First-Time User Authentication
 
 ```
-Unknown User             Bot                     Admin (CLI)
-     │                    │                          │
-     │  "Hello"           │                          │
-     │───────────────────►│                          │
-     │                    │  [Auth middleware:        │
-     │                    │   user NOT approved]      │
-     │                    │                          │
-     │                    │  [Generate code: A1B2C3]  │
-     │                    │  [Store pending in state]  │
-     │                    │                          │
-     │  "Your code:       │                          │
-     │   A1B2C3"          │                          │
-     │◄───────────────────│                          │
-     │                    │                          │
-     │  (any message)     │                          │
-     │───────────────────►│                          │
-     │                    │  [Auth middleware:        │
-     │                    │   pending → silent drop]  │
-     │                    │                          │
-     │                    │    docker exec ...        │
-     │                    │    python -m bot.cli      │
-     │                    │      approve A1B2C3       │
-     │                    │◄─────────────────────────│
-     │                    │                          │
-     │                    │  [CLI: move user_id to    │
-     │                    │   config.approved_users]   │
-     │                    │  [CLI: remove pending]     │
-     │                    │  [CLI: send TG notify]     │
-     │                    │                          │
-     │  "✅ Approved!"     │                          │
-     │◄───────────────────│                          │
-     │                    │                          │
-     │  (next message     │                          │
-     │   processed        │                          │
-     │   normally)        │                          │
-     │                    │                          │
+User sends any message
+         │
+         ▼
+┌─────────────────┐
+│ Auth Middleware │
+│ - Not in        │
+│   approved_users│
+│ - Generate code │
+│ - Store in state│
+└────────┬────────┘
+         │
+         ▼
+┌─────────────────┐
+│ Send code via   │
+│ Telegram        │
+└────────┬────────┘
+         │
+         ▼
+┌─────────────────┐     ┌─────────────────┐
+│ User sees:      │────►│ Admin runs:     │
+│ "Your code:     │     │ python -m bot.cli│
+│  AB12CD"        │     │ approve AB12CD   │
+└─────────────────┘     └────────┬────────┘
+                                  │
+                                  ▼
+                         ┌─────────────────┐
+                         │ Add user_id to  │
+                         │ config.json     │
+                         └────────┬────────┘
+                                  │
+                                  ▼
+                         ┌─────────────────┐
+                         │ Notify user:    │
+                         │ "✅ Approved!"  │
+                         └─────────────────┘
 ```
 
-### 4.3 New Chat Flow
+### 3.2 Message Relay (Static Config Model)
 
 ```
-User                     Bot                          Agent Zero
-     │                    │                                │
-     │  /new myproject    │                                │
-     │───────────────────►│                                │
-     │                    │  POST /api_message             │
-     │                    │  {context_id: "",              │
-     │                    │   message: ".",                │
-     │                    │   project_name: "myproject"}   │
-     │                    │───────────────────────────────►│
-     │                    │                                │
-     │                    │  {context_id: "new-uuid",      │
-     │                    │   response: "..."}             │
-     │                    │◄───────────────────────────────│
-     │                    │                                │
-     │                    │  [State: save new context_id   │
-     │                    │   for this user]               │
-     │                    │                                │
-     │  "🆕 New chat       │                                │
-     │   created with     │                                │
-     │   project          │                                │
-     │   myproject"       │                                │
-     │◄───────────────────│                                │
+Approved user sends message
+            │
+            ▼
+┌─────────────────────┐
+│ 1. Send "⏳"        │
+│    to Telegram      │
+└─────────┬───────────┘
+          │
+          ▼
+┌─────────────────────┐
+│ 2. Determine params │
+│    from config:     │
+│    - project_name = │
+│      fixed_project_name
+│    - context_id =   │
+│      fixed_context_id│
+│      OR auto_context_id
+│      from state     │
+│      OR None (auto) │
+└─────────┬───────────┘
+          │
+          ▼
+┌─────────────────────┐
+│ 3. POST /api_message │
+│    to A0 instance   │
+└─────────┬───────────┘
+          │
+          ▼
+┌─────────────────────┐
+│ 4. If new context   │
+│    created: save    │
+│    context_id to    │
+│    state.json       │
+└─────────┬───────────┘
+          │
+          ▼
+┌─────────────────────┐
+│ 5. Format response  │
+│    (Markdown→HTML)  │
+└─────────┬───────────┘
+          │
+          ▼
+┌─────────────────────┐
+│ 6. Edit "⏳" with   │
+│    first chunk +    │
+│    send rest        │
+└─────────────────────┘
 ```
 
 ---
 
-## 5. Directory Structure
+## 4. API Interactions
+
+### 4.1 Agent Zero Endpoints Used
+
+| Endpoint | Method | Purpose | Payload |
+|----------|--------|---------|---------|
+| `/api_message` | POST | Send user message to A0 | `{content, context_id?, project_name?}` |
+| `/api_reset_chat` | POST | Reset A0 context | `{context_id}` |
+| `/api_terminate_chat` | POST | Terminate A0 context | `{context_id}` |
+
+**Note**: `/projects` endpoint exists but requires web authentication (CSRF/cookies), so this bot does NOT use it. Project is configured statically in `config.json` instead.
+
+### 4.2 Context Management (Static Model)
+
+**Configuration Options**:
+
+| Scenario | `fixed_project_name` | `fixed_context_id` | Behavior |
+|----------|----------------------|-------------------|----------|
+| A | Not set | Not set | Use A0 default project, auto-create context, persist to state |
+| B | Set | Not set | Use specified project, auto-create context, persist to state |
+| C | Set | Set | Use specified project and context always (no auto-create) |
+| D | Not set | Set | Use A0 default project, use specified context |
+
+**Auto-Create Flow**:
 
 ```
-agent-zero-telegram/
-├── bot/
-│   ├── __init__.py               # Package init
-│   ├── __main__.py               # Allows `python -m bot` to run main
-│   ├── main.py                   # Entry point: init bot, wire deps, start polling
-│   ├── config.py                 # Pydantic config models, load/save
-│   ├── state.py                  # Pydantic state models, atomic persistence
-│   ├── a0_client.py              # aiohttp wrapper for A0 API endpoints
-│   ├── formatters.py             # A0 markdown → Telegram HTML conversion
-│   ├── cli.py                    # CLI tool: approve, pending, users, revoke
-│   ├── routers/
-│   │   ├── __init__.py
-│   │   ├── commands.py           # /start, /new, /reset, /delete, /status, /help
-│   │   └── messages.py           # Catch-all text message → A0 forwarding
-│   └── middleware/
-│       ├── __init__.py
-│       └── auth.py               # Outer middleware: user verification gate
-├── config.json                   # Configuration (bind-mounted in Docker)
-├── Dockerfile                    # Container build
-├── docker-compose.yml            # Deployment orchestration
-├── requirements.txt              # Python dependencies
-├── README.md                     # Setup & usage guide
-├── research.md                   # Research document
-└── specs/
-    └── 1-initial-implementation/
-        └── architecture.md       # This file
+First message with context_id=None
+            │
+            ▼
+┌─────────────────────┐
+│ A0 creates new      │
+│ context internally    │
+└─────────┬───────────┘
+          │
+          ▼
+┌─────────────────────┐
+│ Response includes   │
+│ context_id          │
+└─────────┬───────────┘
+          │
+          ▼
+┌─────────────────────┐
+│ Bot saves to        │
+│ state.json          │
+│ as auto_context_id  │
+└─────────┬───────────┘
+          │
+          ▼
+┌─────────────────────┐
+│ Subsequent messages │
+│ use this context_id │
+└─────────────────────┘
 ```
-
-**File count**: ~15 Python files. This is intentionally small. No abstraction layers that don't earn their keep.
 
 ---
 
-## 6. Configuration Schema
+## 5. Configuration Schema
 
-### `config.json`
+### 5.1 config.json Structure
 
 ```json
 {
     "telegram": {
         "bot_token": "123456:ABC-DEF...",
-        "approved_users": [],
+        "approved_users": [123456789, 987654321],
         "parse_mode": "HTML"
     },
     "agent_zero": {
         "host": "http://agent-zero",
         "port": 80,
-        "api_key": "your-mcp-server-token",
-        "default_project": null,
+        "api_key": "your-api-key-here",
         "timeout_seconds": 300,
-        "lifetime_hours": 24
+        "fixed_project_name": "my-project",
+        "fixed_context_id": null
     },
     "state_file": "/data/state.json"
 }
 ```
 
-### Field Reference
-
-| Field | Type | Required | Default | Description |
-|-------|------|----------|---------|-------------|
-| `telegram.bot_token` | string | ✅ | — | Telegram Bot API token from @BotFather |
-| `telegram.approved_users` | int[] | No | `[]` | List of approved Telegram user IDs |
-| `telegram.parse_mode` | string | No | `"HTML"` | Telegram message parse mode |
-| `agent_zero.host` | string | No | `"http://agent-zero"` | A0 container hostname/URL |
-| `agent_zero.port` | int | No | `80` | A0 HTTP port |
-| `agent_zero.api_key` | string | ✅ | — | A0 MCP server token for `X-API-KEY` header |
-| `agent_zero.default_project` | string? | No | `null` | Default project for new chats |
-| `agent_zero.timeout_seconds` | int | No | `300` | HTTP timeout for A0 API calls |
-| `agent_zero.lifetime_hours` | int | No | `24` | A0 chat context lifetime |
-| `state_file` | string | No | `"/data/state.json"` | Path to persistent state file |
-
-### Config Access Pattern
-
-- **Bot process**: Reads on startup. Re-reads `approved_users` on every auth check (to pick up CLI changes without restart).
-- **CLI process**: Reads and writes directly. Modifies `approved_users` on approve/revoke.
-- **Concurrency safety**: Only the CLI writes to config. The bot only reads. No locking needed. The CLI uses atomic write (write tmp → rename).
-
----
-
-## 7. State Management
-
-### State File (`/data/state.json`)
+### 5.2 state.json Structure
 
 ```json
 {
     "pending_verifications": {
-        "A1B2C3": {
-            "user_id": 123456789,
-            "username": "john_doe",
-            "code": "A1B2C3",
-            "created_at": "2025-02-07T12:00:00Z"
+        "AB12CD": {
+            "sender_id": 123456789,
+            "code": "AB12CD",
+            "created_at": "2026-01-15T10:30:00",
+            "expires_at": "2026-01-15T10:40:00"
         }
     },
-    "users": {
-        "123456789": {
-            "context_id": "550e8400-e29b-41d4-a716-446655440000",
-            "project": "agent_zero"
-        }
-    }
+    "auto_context_id": "uuid-generated-by-a0",
+    "version": 1
 }
 ```
 
-### State Lifecycle
-
-| Event | State Change |
-|-------|--------------|
-| Unknown user sends message | Add entry to `pending_verifications` |
-| Admin approves code | Remove from `pending_verifications`, add user_id to `config.approved_users` |
-| Code expires (10 min) | Remove from `pending_verifications` (lazy cleanup) |
-| `/new` command | Update `users[id].context_id` and `.project` |
-| `/delete` command | Clear `users[id].context_id` |
-| Auto-create context (first message) | Set `users[id].context_id` |
-
-### Persistence Strategy
-
-- **Write trigger**: Every state mutation triggers an immediate write
-- **Write method**: Atomic — `json.dump` to a `.tmp` file, then `os.replace()` to the target path
-- **Read**: On startup only (state lives in memory during runtime)
-- **Volume**: `/data/` is a named Docker volume, survives container restarts
-
 ---
 
-## 8. Docker Deployment
+## 6. Deployment Architecture
 
-### Container Architecture
-
-```
-┌─────────────────────────────────────────────────┐
-│              Docker Host (VPS)                    │
-│                                                  │
-│  ┌──────────────────────────────────────────┐    │
-│  │         Docker Network: a0-network        │    │
-│  │                                           │    │
-│  │  ┌─────────────────┐  ┌───────────────┐  │    │
-│  │  │ a0-telegram-bot  │  │  agent-zero   │  │    │
-│  │  │                  │  │               │  │    │
-│  │  │ python:3.12-slim │  │  Port 80      │  │    │
-│  │  │ No exposed ports │  │  (+ 50080     │  │    │
-│  │  │                  │──│   external)   │  │    │
-│  │  │ Volumes:         │  │               │  │    │
-│  │  │  ./config.json   │  └───────────────┘  │    │
-│  │  │  bot-data:/data  │                     │    │
-│  │  └─────────────────┘                      │    │
-│  └──────────────────────────────────────────┘    │
-└─────────────────────────────────────────────────┘
-```
-
-### Dockerfile
-
-```dockerfile
-FROM python:3.12-slim
-
-WORKDIR /app
-
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
-COPY bot/ ./bot/
-
-CMD ["python", "-m", "bot"]
-```
-
-**Notes**:
-- `config.json` is NOT copied into the image — it's bind-mounted at runtime
-- No exposed ports — long polling is outbound-only
-- Minimal image: ~150MB (python:3.12-slim + deps)
-
-### docker-compose.yml
+### 6.1 Docker Compose Stack
 
 ```yaml
+version: '3.8'
+
 services:
+  agent-zero:
+    image: agent0ai/agent-zero:latest
+    # ... A0 configuration ...
+    networks:
+      - a0-network
+
   telegram-bot:
     build: .
     container_name: a0-telegram-bot
     restart: unless-stopped
+    environment:
+      - PYTHONUNBUFFERED=1
     volumes:
-      - ./config.json:/app/config.json
-      - bot-data:/data
+      - ./config.json:/app/config.json:ro
+      - ./data:/data
     networks:
       - a0-network
-
-volumes:
-  bot-data:
+    depends_on:
+      - agent-zero
 
 networks:
   a0-network:
-    external: true
+    driver: bridge
 ```
 
-### Network Connectivity
+### 6.2 Volume Mounts
 
-- The bot reaches A0 at `http://agent-zero:80` (Docker DNS resolves the container name)
-- A0's port does NOT need to be exposed to the host for the bot to reach it
-- The bot has no inbound ports — zero attack surface from the network
+| Host Path | Container Path | Purpose | Mode |
+|-----------|---------------|---------|------|
+| `./config.json` | `/app/config.json` | Bot configuration | Read-only |
+| `./data/` | `/data/` | Runtime state (auto_context_id, pending) | Read-write |
 
-### Admin CLI Access
+### 6.3 Security Model
 
-```bash
-# Approve a user
-docker exec a0-telegram-bot python -m bot.cli approve A1B2C3
+- **No inbound ports**: Bot uses long polling (outbound HTTPS only)
+- **Internal network**: Bot ↔ A0 communication stays on Docker bridge network
+- **Read-only config**: `config.json` mounted read-only; CLI tool writes via atomic replace
+- **Secrets in config**: `bot_token` and `api_key` never in environment variables or logs
 
-# List pending verifications
-docker exec a0-telegram-bot python -m bot.cli pending
+### 6.4 Multi-Project Setup
 
-# List approved users
-docker exec a0-telegram-bot python -m bot.cli users
+To run multiple bots for different projects:
 
-# Revoke a user
-docker exec a0-telegram-bot python -m bot.cli revoke 123456789
+```
+project-a-bot/
+├── config.json      # fixed_project_name: "project-a"
+├── docker-compose.yml
+└── data/
+
+project-b-bot/
+├── config.json      # fixed_project_name: "project-b"
+├── docker-compose.yml
+└── data/
 ```
 
----
-
-## 9. Error Handling Strategy
-
-### Error Categories
-
-| Category | Examples | Bot Behavior |
-|----------|----------|--------------|
-| **A0 Unreachable** | Connection refused, DNS failure | Reply: "⚠️ Agent Zero is not reachable. Is it running?" |
-| **A0 Timeout** | Response takes > `timeout_seconds` | Edit processing msg: "⏰ Request timed out. A0 may still be processing." |
-| **A0 API Error** | 401 (bad key), 500 (internal) | Reply with error type. Log full details. |
-| **A0 Bad Response** | Malformed JSON, missing fields | Reply: "⚠️ Unexpected response from A0." Log raw response. |
-| **Telegram API Error** | Rate limit, message too long, chat not found | Retry with backoff for rate limits. Split for length. Log others. |
-| **Config Error** | Missing bot_token, invalid JSON | Fail fast on startup with clear error message. |
-| **State Corruption** | Invalid JSON in state file | Log warning, reset state to empty, continue. |
-
-### Error Handling Principles
-
-1. **Never crash silently**: All exceptions are caught, logged, and result in a user-facing message when possible.
-2. **Never leak internals**: Error messages to users are generic. Full details go to logs only.
-3. **Fail fast on startup**: Config validation errors prevent the bot from starting (better than runtime failures).
-4. **Graceful degradation**: If state file is corrupted, reset and continue. If A0 is down, tell the user and keep accepting messages.
-5. **Retry sparingly**: Only retry on transient network errors (connection reset, DNS timeout). Never retry on 4xx errors.
-
-### Logging
-
-- Use Python's `logging` module
-- Log level: `INFO` by default, `DEBUG` available via env var
-- Log format: `%(asctime)s [%(levelname)s] %(name)s: %(message)s`
-- Log destinations: stdout (Docker captures it)
-- Key events to log: startup, shutdown, auth events, A0 API calls (request/response summary), errors
-
-### Timeout Handling (Detail)
-
-Since A0's `/api_message` is synchronous and can take minutes:
-
-1. `aiohttp` timeout is set to `config.agent_zero.timeout_seconds` (default 300s)
-2. The "⏳ Processing..." message is sent immediately before the API call
-3. On timeout: edit the processing message with a timeout notice
-4. The user can send another message — it won't interfere (aiogram handles concurrent updates)
-5. A0 may still complete the task server-side even after our timeout — this is acceptable; the response is simply lost
+Each bot:
+- Has its own Telegram bot token (create via @BotFather)
+- Connects to the same or different A0 instance
+- Maintains its own approved users list
+- Has its own auto-created or fixed context
 
 ---
 
-## 10. Security Considerations
+## 7. Error Handling Strategy
 
-### Threat Model
+### 7.1 A0 API Errors
 
-This is a private bot for 1-3 trusted users. The primary threats are:
+| Error Type | User Message | Log Level | Recovery |
+|------------|-------------|-----------|----------|
+| Timeout (>300s) | "⏰ Request timed out..." | WARNING | User retries |
+| Connection refused | "⚠️ Agent Zero is not reachable..." | ERROR | Check A0 status |
+| HTTP 4xx/5xx | "⚠️ An error occurred..." | ERROR | Check logs |
+| Invalid JSON | "⚠️ Unexpected response..." | ERROR | Check A0 logs |
 
-1. **Unauthorized access**: Random Telegram users discovering the bot and sending commands to A0
-2. **Secret exposure**: Bot token or A0 API key leaking
-3. **A0 abuse**: An approved user sending malicious prompts (out of scope — A0's own sandboxing handles this)
+### 7.2 Telegram API Errors
 
-### Mitigations
-
-| Threat | Mitigation |
-|--------|------------|
-| Unauthorized access | Auth middleware blocks all unapproved users before any handler runs |
-| Brute-force code guessing | 6 hex chars = 16.7M combinations. 10-min expiry. Rate limit: 1 code/min/user. |
-| Bot token exposure | Stored in bind-mounted config.json, not in image. `.gitignore` the file. |
-| API key exposure | Same as bot token — config.json only. |
-| Network sniffing (bot↔A0) | Internal Docker network only. No traffic leaves the host. |
-| Network sniffing (bot↔Telegram) | HTTPS enforced by Telegram's API. |
-| State file tampering | File is inside a Docker volume. Only the bot and CLI write to it. |
-| CLI access | Requires `docker exec` = requires SSH/root access to the host. |
-
-### Secrets Management
-
-- `bot_token` and `api_key` live in `config.json`
-- `config.json` is bind-mounted (not baked into the image)
-- Add `config.json` to `.gitignore` and `.dockerignore`
-- Provide a `config.example.json` with placeholder values for documentation
-
-### What This Architecture Does NOT Handle
-
-- **End-to-end encryption**: Telegram messages are encrypted in transit but Telegram servers can read them. This is inherent to the Telegram Bot API.
-- **Prompt injection via Telegram**: If an approved user sends a malicious prompt, A0 processes it. This is by design — the user is trusted.
-- **Multi-tenancy isolation**: All approved users share the same A0 instance. User A could theoretically access User B's chat if they know the context_id. For the MVP (1-3 trusted users), this is acceptable.
+| Error Type | Handler | Action |
+|------------|---------|--------|
+| HTML parse error | Formatter | Retry as plain text |
+| Message too long | Formatter | Split into chunks |
+| Bot blocked by user | Auth middleware | Remove from approved (optional) |
+| Rate limit | aiogram | Exponential backoff (built-in) |
 
 ---
 
-## Appendix: A0 API Endpoints Used
+## 8. Testing Strategy
 
-| Endpoint | Method | Auth | Request Body | Response | Used For |
-|----------|--------|------|-------------|----------|----------|
-| `/api_message` | POST | `X-API-KEY` | `{context_id?, message, project_name?, attachments?, lifetime_hours?}` | `{context_id, response}` | Send messages, create chats |
-| `/api_reset_chat` | POST | `X-API-KEY` | `{context_id}` | `{ok: true}` | `/reset` command |
-| `/api_terminate_chat` | POST | `X-API-KEY` | `{context_id}` | `{ok: true}` | `/delete` command |
+### 8.1 Unit Tests
+
+| Component | Test Coverage |
+|-----------|--------------|
+| Config | Load, validate, save, atomic write, computed fields |
+| State | Add/remove pending, expiry, atomic write, version |
+| Formatter | Markdown→HTML, splitting, tag balance, edge cases |
+| A0 Client | Mock aiohttp, test exceptions, retry logic |
+| Auth Middleware | Mock updates, code generation, expiry, rate limit |
+
+### 8.2 Integration Tests
+
+| Scenario | Setup |
+|----------|-------|
+| Full auth flow | Send message → get code → CLI approve → send message → get response |
+| Auto-context | First message with no context_id → verify state saved → second message uses saved context |
+| Fixed context | Set fixed_context_id → verify all messages use it |
+| Error handling | Stop A0 container → verify error message |
+| Restart recovery | Start bot, approve user, restart container → verify user still approved and context persisted |
+
+### 8.3 Manual QA Checklist
+
+- [ ] First message from new user generates code
+- [ ] Second message from same user is silent
+- [ ] CLI approve sends success notification
+- [ ] Approved user can send messages
+- [ ] /status shows correct project and context
+- [ ] Long response (>4096 chars) splits correctly
+- [ ] Bot restart preserves approved users and context
+- [ ] Multiple users share same context (collaborative)
+
+---
+
+## 9. Design Decisions & Trade-offs
+
+### 9.1 Static vs Dynamic Configuration
+
+| Approach | Pros | Cons | Chosen |
+|----------|------|------|--------|
+| **Static** (this design) | Simple state, no complex UI, easy to reason about, one bot per project is clean | Need multiple bots for multiple projects | ✅ Yes |
+| **Dynamic** (original) | Single bot can switch projects/contexts | Complex state management, more commands, harder to test | ❌ No |
+
+**Rationale**: The "one service per responsibility" pattern is clearer for a self-hosted tool. Users who need multiple projects can run multiple lightweight bot containers.
+
+### 9.2 Long Polling vs Webhooks
+
+| Approach | Pros | Cons | Chosen |
+|----------|------|------|--------|
+| **Long Polling** | No inbound ports, no TLS setup, works behind NAT/firewall | Slightly higher latency (acceptable) | ✅ Yes |
+| **Webhooks** | Lower latency, instant delivery | Requires public HTTPS URL, TLS cert, reverse proxy | ❌ No |
+
+### 9.3 Per-User vs Shared Context
+
+| Approach | Pros | Cons | Chosen |
+|----------|------|------|--------|
+| **Shared** (this design) | Simple state, collaborative conversations, easier to manage | Users see each other's messages to A0 | ✅ Yes |
+| **Per-User** | Privacy between users | Complex state management, more memory, harder to debug | ❌ No |
+
+**Rationale**: The bot is designed for small trusted teams (1-3 users). Shared context enables collaboration (e.g., "Alice, what did you ask A0 about the database yesterday?").
+
+### 9.4 Config File vs Environment Variables
+
+| Approach | Pros | Cons | Chosen |
+|----------|------|------|--------|
+| **Config File** | All settings in one place, easy to edit, supports complex structures | Need to bind-mount file | ✅ Yes |
+| **Env Vars** | 12-factor app style, cloud-native | Scattered configuration, harder for users to set up | ❌ No |
+
+---
+
+## 10. Future Considerations
+
+### 10.1 Potential Phase 2 Features
+
+| Feature | Complexity | Notes |
+|---------|-----------|-------|
+| File attachments | Medium | Need base64 encoding, detect mime types |
+| Image responses | Medium | Detect image paths in A0 response, send as photo |
+| Voice messages | High | Requires STT integration (Whisper API?) |
+| Streaming responses | High | Need to poll A0's `/poll` endpoint (requires web auth) |
+
+### 10.2 Migration Path
+
+If dynamic project switching is needed later:
+
+1. Add `user_contexts: dict[int, UserContext]` to state
+2. Add `/new`, `/chats`, `/projects` commands
+3. Modify auth middleware to track current context per user
+4. Migration: existing `auto_context_id` becomes each approved user's initial context
+
+This is a data model change but the architecture (routers, formatters, client) remains compatible.

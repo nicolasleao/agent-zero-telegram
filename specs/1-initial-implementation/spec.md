@@ -1,7 +1,7 @@
 # Product Specification — Agent Zero Telegram Bot
 
-> **Version**: 1.0 — Initial Implementation  
-> **Date**: 2025-02-07  
+> **Version**: 2.0 — Simplified Static Config Architecture  
+> **Date**: 2026-02-07  
 > **Status**: Draft  
 > **Architecture**: See [architecture.md](./architecture.md) for technical design details
 
@@ -15,7 +15,7 @@
 4. [Non-Functional Requirements](#4-non-functional-requirements)
 5. [Acceptance Criteria](#5-acceptance-criteria)
 6. [Out of Scope](#6-out-of-scope)
-7. [Open Questions & Decisions](#7-open-questions--decisions)
+7. [Design Decisions](#7-design-decisions)
 
 ---
 
@@ -23,7 +23,7 @@
 
 ### What
 
-A standalone Python Telegram bot that acts as a messaging bridge between Telegram and a running Agent Zero (A0) instance. Users send messages and commands via Telegram; the bot relays them to A0's REST API and returns the responses.
+A standalone Python Telegram bot that acts as a messaging bridge between Telegram and a running Agent Zero (A0) instance. One bot instance serves exactly one A0 project and chat context, configured statically via `config.json`.
 
 ### Why
 
@@ -33,6 +33,7 @@ Agent Zero's primary interface is a web UI. A Telegram bot provides:
 - **Conversational UX**: Natural chat interface without opening a browser
 - **Notification-friendly**: Telegram push notifications when A0 finishes processing
 - **Low friction**: No URL to remember, no login page — just open the Telegram chat
+- **Simplicity**: One bot = one project = one chat. Need another project? Spin up another bot instance.
 
 ### Who
 
@@ -43,10 +44,11 @@ Agent Zero's primary interface is a web UI. A Telegram bot provides:
 ### How It Works (Summary)
 
 1. Bot runs as a separate Docker container on the same network as Agent Zero
-2. Users send messages in Telegram → bot forwards to A0's `/api_message` endpoint
-3. A0 processes the request (may take seconds to minutes) → bot returns the response
-4. Authentication: first-time users receive a verification code; admin approves via CLI
-5. Users can manage multiple A0 chat sessions and switch between projects
+2. Admin configures `project_name` and optionally `context_id` in `config.json` before starting
+3. All approved users share the same A0 project and chat context
+4. Users send messages in Telegram → bot forwards to A0's `/api_message` endpoint
+5. A0 processes the request (may take seconds to minutes) → bot returns the response
+6. Authentication: first-time users receive a verification code; admin approves via CLI
 
 ---
 
@@ -72,31 +74,13 @@ Agent Zero's primary interface is a web UI. A Telegram bot provides:
 | US-13 | As a **user**, I want A0's markdown formatting (bold, code, links) to render properly in Telegram, so that responses are readable. | Must |
 | US-14 | As a **user**, I want to receive a clear error message if A0 is unreachable or times out, so that I know what happened. | Must |
 
-### Chat Management
-
-| ID | Story | Priority |
-|----|-------|----------|
-| US-20 | As a **user**, I want to create a new A0 chat session with `/new`, so that I can start a fresh conversation. | Must |
-| US-21 | As a **user**, I want to create a new chat with a specific project using `/new <project>`, so that the chat uses that project's context. | Must |
-| US-22 | As a **user**, I want to list my chat sessions with `/chats`, so that I can see what conversations I have. | Should |
-| US-23 | As a **user**, I want to switch between chat sessions by selecting from a list, so that I can resume previous conversations. | Should |
-| US-24 | As a **user**, I want to reset the current chat with `/reset`, so that I can clear the conversation history without creating a new session. | Should |
-| US-25 | As a **user**, I want to delete the current chat with `/delete`, so that I can clean up sessions I no longer need. | Should |
-
-### Project Management
-
-| ID | Story | Priority |
-|----|-------|----------|
-| US-30 | As a **user**, I want to list available A0 projects with `/projects`, so that I can see what projects exist. | Should |
-| US-31 | As a **user**, I want to select a project from the list to use with my next `/new` chat, so that I can easily switch project contexts. | Should |
-
 ### Information & Help
 
 | ID | Story | Priority |
 |----|-------|----------|
 | US-40 | As a **user**, I want to see a welcome message with basic instructions when I first use `/start`, so that I know how to use the bot. | Must |
 | US-41 | As a **user**, I want to see all available commands with `/help`, so that I can discover the bot's capabilities. | Must |
-| US-42 | As a **user**, I want to see my current session info with `/status`, so that I know which chat and project I'm using. | Should |
+| US-42 | As a **user**, I want to see my current session info with `/status`, so that I know which project the bot is connected to. | Should |
 
 ### Deployment
 
@@ -104,7 +88,8 @@ Agent Zero's primary interface is a web UI. A Telegram bot provides:
 |----|-------|----------|
 | US-50 | As an **admin**, I want to deploy the bot with `docker-compose up -d`, so that setup is simple and reproducible. | Must |
 | US-51 | As an **admin**, I want to configure the bot via a single `config.json` file, so that all settings are in one place. | Must |
-| US-52 | As an **admin**, I want bot state to persist across container restarts, so that approved users and active chats survive reboots. | Must |
+| US-52 | As an **admin**, I want bot state to persist across container restarts, so that approved users survive reboots. | Must |
+| US-53 | As an **admin**, I want to set the project and chat context in config.json, so that the bot always connects to the right A0 project. | Must |
 
 ---
 
@@ -128,8 +113,8 @@ Agent Zero's primary interface is a web UI. A Telegram bot provides:
 
 | ID | Requirement | Details |
 |----|-------------|---------|
-| FR-10 | **Text message forwarding** | Any non-command text message from an approved user is sent to A0 via `POST /api_message` with the user's current `context_id`. |
-| FR-11 | **Auto-create context** | If the user has no active `context_id`, send the message with an empty `context_id`. A0 will create a new context and return it. Store the returned `context_id` in state. |
+| FR-10 | **Text message forwarding** | Any non-command text message from an approved user is sent to A0 via `POST /api_message` with the configured `context_id` and `project_name`. |
+| FR-11 | **Auto-create context** | If `fixed_context_id` is not set in config, send the first message with an empty `context_id`. A0 will create a new context and return it. The bot stores the returned `context_id` in the state file for persistence. |
 | FR-12 | **Processing indicator** | Immediately send a "⏳ Processing..." message before making the A0 API call. Edit this message with the actual response when A0 replies. |
 | FR-13 | **Timeout handling** | If the A0 API call exceeds `timeout_seconds` (default 300s), edit the processing message to: "⏰ Request timed out. Agent Zero may still be processing." |
 | FR-14 | **Connection error handling** | If A0 is unreachable, reply with: "⚠️ Agent Zero is not reachable. Is it running?" |
@@ -145,35 +130,33 @@ Agent Zero's primary interface is a web UI. A Telegram bot provides:
 | FR-23 | **Parse mode** | All bot messages use `parse_mode="HTML"` for consistent formatting. |
 | FR-24 | **Fallback on parse error** | If Telegram rejects the HTML (malformed tags), retry sending as plain text with formatting stripped. |
 
-### 3.4 Chat Management Commands
+### 3.4 Static Configuration
 
 | ID | Requirement | Details |
 |----|-------------|---------|
-| FR-30 | **`/start` command** | Send a welcome message with bot description and basic usage instructions. If the user has no active context, create one. |
-| FR-31 | **`/new [project]` command** | Create a new A0 chat. If `project` argument is provided, pass it as `project_name` to `/api_message`. Update the user's state with the new `context_id`. |
-| FR-32 | **`/chats` command** | Display a list of the user's chat sessions (tracked in bot state). Show context ID (truncated), project name, and creation info. Use inline keyboard buttons for switching. |
-| FR-33 | **`/reset` command** | Reset the current chat by calling `POST /api_reset_chat` with the user's `context_id`. Confirm to the user. |
-| FR-34 | **`/delete` command** | Terminate the current chat by calling `POST /api_terminate_chat`. Clear the `context_id` from user state. Confirm to the user. |
-| FR-35 | **`/status` command** | Display: current context ID, active project (if any), user's Telegram ID, and bot connection status. |
-| FR-36 | **`/help` command** | Display all available commands with brief descriptions. |
+| FR-30 | **Fixed project name** | Admin sets `agent_zero.fixed_project_name` in `config.json`. All messages are sent to this project. If not set, messages use no project (A0 default). |
+| FR-31 | **Fixed context ID** | Admin may optionally set `agent_zero.fixed_context_id` in `config.json`. If set, all messages use this context. If not set, bot auto-creates and persists the context ID in state file. |
+| FR-32 | **Context persistence** | When auto-creating a context, the bot stores the returned `context_id` in the state file and uses it for all subsequent messages. |
+| FR-33 | **Project display** | `/status` command shows the configured `fixed_project_name` (or "Default" if not set). |
+| FR-34 | **Context display** | `/status` command shows the current `context_id` (truncated for readability). |
 
-### 3.5 Project Management
+### 3.5 Help Commands
 
 | ID | Requirement | Details |
 |----|-------------|---------|
-| FR-40 | **`/projects` command** | List available A0 projects. For MVP, read from a `projects` list in `config.json` (since A0's `/projects` endpoint requires web auth). |
-| FR-41 | **Project selection** | Display projects as inline keyboard buttons. When selected, store the project name in user state for use with the next `/new` command. |
-| FR-42 | **Default project** | If `config.agent_zero.default_project` is set, use it automatically for `/new` when no project is specified and no project is selected. |
+| FR-40 | **`/start` command** | Send a welcome message with bot description, the configured project name, and basic usage instructions. |
+| FR-41 | **`/help` command** | Display all available commands: `/start`, `/help`, `/status`. Brief description of each. |
+| FR-42 | **`/status` command** | Display: configured project name, current context ID (truncated), bot connection status, and your Telegram user ID. |
 
 ### 3.6 State Persistence
 
 | ID | Requirement | Details |
 |----|-------------|---------|
-| FR-50 | **State file** | All runtime state (pending verifications, user sessions) is persisted to a JSON file at `config.state_file`. |
+| FR-50 | **State file** | Runtime state (pending verifications, auto-created context_id) is persisted to a JSON file at `config.state_file`. |
 | FR-51 | **Atomic writes** | State is written using atomic file replacement (write to `.tmp`, then `os.replace()`). |
 | FR-52 | **Write-on-change** | State is written to disk immediately on every mutation. |
 | FR-53 | **Startup recovery** | On startup, load state from file. If the file is missing or corrupted, start with empty state and log a warning. |
-| FR-54 | **Chat history tracking** | The bot maintains its own registry of chats it has created per user (context_id, project, created_at). This is the source of truth for `/chats`. |
+| FR-54 | **No per-user contexts** | All approved users share the same A0 context (as configured in `config.json` or auto-created). |
 
 ### 3.7 Configuration
 
@@ -202,7 +185,7 @@ Agent Zero's primary interface is a web UI. A Telegram bot provides:
 | ID | Requirement | Target |
 |----|-------------|--------|
 | NFR-10 | **Crash recovery** | Bot restarts automatically via Docker `restart: unless-stopped` |
-| NFR-11 | **State durability** | All approved users and active sessions survive container restarts |
+| NFR-11 | **State durability** | Approved users and auto-created context_id survive container restarts |
 | NFR-12 | **Graceful degradation** | If A0 is down, bot remains responsive and informs users of the issue |
 | NFR-13 | **No silent failures** | All errors result in either a user-facing message or a log entry (or both) |
 
@@ -220,7 +203,7 @@ Agent Zero's primary interface is a web UI. A Telegram bot provides:
 
 | ID | Requirement | Target |
 |----|-------------|--------|
-| NFR-30 | **Code simplicity** | ~15 Python files, no unnecessary abstraction layers |
+| NFR-30 | **Code simplicity** | ~12 Python files, no unnecessary abstraction layers |
 | NFR-31 | **Logging** | Structured logging via Python `logging` module to stdout. Key events: startup, auth, API calls, errors. |
 | NFR-32 | **Dependency count** | 3 direct dependencies: `aiogram`, `aiohttp`, `pydantic` |
 
@@ -272,15 +255,22 @@ GIVEN an approved user sends a text message
 WHEN the message handler processes it
 THEN the bot immediately replies with "⏳ Processing..."
  AND sends the message to A0 via POST /api_message
+  with the configured project_name and context_id
  AND edits the processing message with A0's formatted response
 ```
 
 ```
-GIVEN an approved user sends a message with no active context
-WHEN the message handler processes it
+GIVEN no fixed_context_id is configured
+WHEN the first message is sent
 THEN A0 creates a new context
- AND the bot stores the returned context_id in user state
- AND subsequent messages use this context_id
+ AND the bot stores the returned context_id in the state file
+ AND subsequent messages use this persisted context_id
+```
+
+```
+GIVEN a fixed_context_id is configured
+WHEN any message is sent
+THEN the bot always uses this context_id for A0 API calls
 ```
 
 ```
@@ -321,60 +311,46 @@ WHEN the send fails with a parse error
 THEN the bot retries sending as plain text with HTML tags stripped
 ```
 
-### AC-4: Chat Management
+### AC-4: Static Configuration
 
 ```
-GIVEN a user sends /new
+GIVEN agent_zero.fixed_project_name is set to "myproject" in config.json
+WHEN any message is sent to A0
+THEN the API call includes project_name="myproject"
+```
+
+```
+GIVEN agent_zero.fixed_context_id is set to "abc-123" in config.json
+WHEN any message is sent to A0
+THEN the API call uses context_id="abc-123"
+```
+
+```
+GIVEN neither fixed_project_name nor fixed_context_id are configured
+WHEN the first message is sent
+THEN A0 creates a new context with default project
+ AND the bot persists the returned context_id
+```
+
+### AC-5: Help Commands
+
+```
+GIVEN a user sends /start
 WHEN the command handler processes it
-THEN a new A0 context is created (via /api_message with empty context_id)
- AND the user's state is updated with the new context_id
- AND the user receives confirmation with the new context info
+THEN the response includes:
+ - A welcome message
+ - The configured project name (or "Default")
+ - Basic usage instructions
 ```
 
 ```
-GIVEN a user sends /new myproject
+GIVEN a user sends /status
 WHEN the command handler processes it
-THEN a new A0 context is created with project_name="myproject"
- AND the user's state is updated with the new context_id and project
-```
-
-```
-GIVEN a user sends /chats
-WHEN the command handler processes it
-THEN the bot displays a list of the user's tracked chat sessions
- AND each entry shows a truncated context ID and project name
- AND inline keyboard buttons allow switching between chats
-```
-
-```
-GIVEN a user sends /reset with an active context
-WHEN the command handler processes it
-THEN the bot calls POST /api_reset_chat with the context_id
- AND confirms the reset to the user
-```
-
-```
-GIVEN a user sends /delete with an active context
-WHEN the command handler processes it
-THEN the bot calls POST /api_terminate_chat with the context_id
- AND removes the context from user state
- AND confirms the deletion to the user
-```
-
-### AC-5: Project Management
-
-```
-GIVEN a user sends /projects
-WHEN the command handler processes it
-THEN the bot displays a list of available projects from config
- AND inline keyboard buttons allow selecting a project
-```
-
-```
-GIVEN a user selects a project from the inline keyboard
-WHEN the callback is processed
-THEN the selected project is stored in user state
- AND the user is informed that the project will be used for the next /new chat
+THEN the response includes:
+ - Configured project name
+ - Current context ID (truncated)
+ - Bot connection status to A0
+ - User's Telegram ID
 ```
 
 ### AC-6: Deployment
@@ -390,7 +366,7 @@ THEN the bot container starts, connects to Telegram, and begins polling
 GIVEN the bot container is restarted
 WHEN it starts up
 THEN all approved users remain approved (from config.json)
- AND all active chat sessions are restored (from state.json)
+ AND the auto-created context_id is restored (from state.json)
 ```
 
 ```
@@ -403,7 +379,7 @@ THEN it exits immediately with a clear error message describing what's wrong
 
 ## 6. Out of Scope
 
-The following are explicitly **NOT** included in this initial implementation:
+The following are explicitly **NOT** included in this implementation:
 
 | Feature | Reason | Future Consideration |
 |---------|--------|---------------------|
@@ -412,36 +388,28 @@ The following are explicitly **NOT** included in this initial implementation:
 | **Voice message support** | Requires speech-to-text integration | Phase 2 |
 | **Streaming/progressive responses** | A0's `/api_message` is synchronous; would need polling `/poll` (web auth) | Phase 2 |
 | **Webhook mode** | Requires HTTPS, public URL, TLS certificates | Only if polling proves insufficient |
-| **Multi-tenancy isolation** | All approved users share the same A0 instance | Only if user base grows |
-| **Telegram admin commands** | CLI-only admin for security (no `/approve` command in Telegram) | Intentional design choice |
-| **Inline mode** | Not needed for a private bot | Not planned |
-| **Group chat support** | Bot is designed for private 1:1 chats only | Not planned |
-| **A0 notification forwarding** | Would require websocket/polling integration with A0 | Phase 2 |
-| **Dynamic project discovery** | A0's `/projects` endpoint requires web auth; using config list for MVP | PR to add API-key endpoint |
-| **Chat naming/renaming** | Nice-to-have UX improvement | Phase 2 |
+| **Multi-project support** | Intentionally excluded — one bot = one project | Spin up another bot instance |
+| **Chat management commands** (/new, /chats, /reset, /delete) | Not needed with static config approach | Not planned |
+| **Project switching** | Intentionally excluded — configure in config.json | Edit config.json and restart |
+| **Per-user contexts** | All users share the same A0 context | Not planned for this simplicity level |
+| **Dynamic project discovery** | A0's `/projects` endpoint requires web auth | Hardcode in config.json |
+| **Chat naming/renaming** | Not applicable with single shared context | Not planned |
 | **Cancel in-progress request** | A0 API doesn't support cancellation | Depends on A0 API changes |
+| **Group chat support** | Bot is designed for private 1:1 chats only | Not planned |
+| **Inline mode** | Not needed for a private bot | Not planned |
+| **A0 notification forwarding** | Would require websocket/polling integration with A0 | Phase 2 |
 
 ---
 
-## 7. Open Questions & Decisions
-
-### Resolved Decisions
+## 7. Design Decisions
 
 | # | Question | Decision | Rationale |
 |---|----------|----------|-----------|
-| D-01 | How to list projects without web auth? | Read from `config.json` projects list | Simplest for MVP; no A0 changes needed |
-| D-02 | How to list chats without `/poll` endpoint? | Bot maintains its own chat registry in state | Self-contained; no A0 dependency |
-| D-03 | How to create new chats? | Send to `/api_message` with empty `context_id` | Avoids `/chat_create` which needs web auth |
-| D-04 | Long polling vs webhooks? | Long polling | No inbound ports, simpler Docker setup |
-| D-05 | Single config file vs env vars? | `config.json` (bind-mounted) | Easier to manage all settings in one place |
-| D-06 | How does admin approve users? | CLI via `docker exec` | Server-level security; can't be spoofed via Telegram |
-
-### Open Questions
-
-| # | Question | Impact | Proposed Resolution |
-|---|----------|--------|--------------------|
-| Q-01 | What initial message should `/new` send to A0 to create a context? | UX — A0 will respond to this message | Send a minimal message like `"."` or `"New chat started."` — needs testing to see what A0 does with it |
-| Q-02 | Should `/chats` show ALL chats ever created, or only recent/active ones? | UX — list could grow long | Show last 10 chats, sorted by most recent. Add pagination if needed later. |
-| Q-03 | How should the bot handle A0 responses that contain only tool outputs / no text? | UX — some A0 responses may be empty or technical | Show the response as-is; if empty, show "✅ Task completed (no text response)." |
-| Q-04 | Should the bot support environment variables as config overrides? | DX — useful for Docker secrets | Nice-to-have; implement if time allows. Env vars override config.json values. |
-| Q-05 | What happens when a user's context_id becomes invalid (A0 cleaned it up)? | Reliability — A0 has `lifetime_hours` auto-cleanup | A0 will likely return an error. Bot should catch this, clear the stale context, and auto-create a new one. |
+| D-01 | How to handle multiple projects? | Static config — one bot per project | Simpler architecture; no state complexity; users spin up multiple bot instances if needed |
+| D-02 | How to handle chat contexts? | Single shared context for all users | All approved users collaborate in the same A0 conversation |
+| D-03 | How to set project and context? | `config.json` fields: `fixed_project_name`, `fixed_context_id` | Explicit configuration; no runtime switching needed |
+| D-04 | What if context_id is not set? | Auto-create on first message and persist | Zero-config startup option; bot self-initializes |
+| D-05 | Long polling vs webhooks? | Long polling | No inbound ports, simpler Docker setup |
+| D-06 | Single config file vs env vars? | `config.json` (bind-mounted) | Easier to manage all settings in one place |
+| D-07 | How does admin approve users? | CLI via `docker exec` | Server-level security; can't be spoofed via Telegram |
+| D-08 | Do users have separate A0 contexts? | No — all share one context | Simpler state management; collaborative usage model |

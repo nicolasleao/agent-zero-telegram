@@ -1,14 +1,27 @@
 {
+    "_comment": "Agent Zero Telegram Bot Configuration - Copy to config.json and fill in your values",
     "telegram": {
         "bot_token": "YOUR_BOT_TOKEN_FROM_BOTFATHER",
         "approved_users": [],
         "parse_mode": "HTML"
     },
     "agent_zero": {
+        "_comment1": "Connection settings for Agent Zero instance",
         "host": "http://agent-zero",
         "port": 80,
         "api_key": "YOUR_AGENT_ZERO_API_KEY",
+
+        "_comment2": "STATIC CONFIGURATION: All messages go to one project/context",
+        "fixed_project_name": null,
+        "_comment3": "fixed_project_name: Optional. All messages use this project (null = A0 default)",
+
+        "fixed_context_id": null,
+        "_comment4": "fixed_context_id: Optional. Use this A0 context ID (null = auto-create and persist)",
+
+        "_comment5": "DEPRECATED: use fixed_project_name instead",
         "default_project": null,
+
+        "_comment6": "Request settings",
         "timeout_seconds": 300,
         "lifetime_hours": 24
     },
