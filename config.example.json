@@ -21,8 +21,13 @@
         "_comment5": "DEPRECATED: use fixed_project_name instead",
         "default_project": null,
 
-        "_comment6": "Request settings",
-        "timeout_seconds": 300,
+        "_comment6": "Optional: Timeout for A0 responses in seconds. Set to null for no timeout (wait indefinitely). Default: null",
+        "timeout": null,
+
+        "_comment7": "DEPRECATED: use timeout instead",
+        "timeout_seconds": null,
+
+        "_comment8": "Context lifetime for auto-created contexts",
         "lifetime_hours": 24
     },
     "state_file": "/data/state.json"

@@ -56,13 +56,17 @@ class A0Client:
     Args:
         base_url: The A0 server base URL (e.g. "http://agent-zero:80").
         api_key: The API key for X-API-KEY authentication.
-        timeout: Request timeout in seconds (default 300).
+        timeout: Request timeout in seconds (None/0 = no timeout, wait indefinitely).
     """
 
-    def __init__(self, base_url: str, api_key: str, timeout: int = 300) -> None:
+    def __init__(self, base_url: str, api_key: str, timeout: int | None = None) -> None:
         self._base_url = base_url.rstrip("/")
         self._api_key = api_key
-        self._timeout = aiohttp.ClientTimeout(total=timeout)
+        # Handle None/0/negative as "no timeout" (wait indefinitely)
+        if timeout is None or timeout <= 0:
+            self._timeout = aiohttp.ClientTimeout(total=None)
+        else:
+            self._timeout = aiohttp.ClientTimeout(total=timeout)
         self._session: aiohttp.ClientSession | None = None
 
     async def _get_session(self) -> aiohttp.ClientSession:
@@ -153,9 +157,9 @@ class A0Client:
             "attachments": attachments or [],
         }
         if context_id:
-            payload["context"] = context_id
+            payload["context_id"] = context_id
         if project_name:
-            payload["project"] = project_name
+            payload["project_name"] = project_name
 
         logger.info(
             "Sending message to A0 (context=%s, project=%s, len=%d)",
@@ -168,7 +172,7 @@ class A0Client:
             raise A0APIError(0, "Empty response from /api_message")
 
         return {
-            "context_id": result.get("context", context_id or ""),
+            "context_id": result.get("context_id", context_id or ""),
             "response": result.get("response", ""),
         }
 
@@ -179,7 +183,7 @@ class A0Client:
             context_id: The context/chat ID to reset.
         """
         logger.info("Resetting A0 chat: %s", context_id)
-        await self._request("POST", "/api_reset_chat", json_body={"context": context_id})
+        await self._request("POST", "/api_reset_chat", json_body={"context_id": context_id})
 
     async def terminate_chat(self, context_id: str) -> None:
         """Terminate a chat in Agent Zero.
@@ -188,7 +192,7 @@ class A0Client:
             context_id: The context/chat ID to terminate.
         """
         logger.info("Terminating A0 chat: %s", context_id)
-        await self._request("POST", "/api_terminate_chat", json_body={"context": context_id})
+        await self._request("POST", "/api_terminate_chat", json_body={"context_id": context_id})
 
     async def close(self) -> None:
         """Close the underlying aiohttp session."""

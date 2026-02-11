@@ -54,12 +54,13 @@ async def main() -> None:
     a0_client = A0Client(
         base_url=config.agent_zero.base_url,
         api_key=config.agent_zero.api_key,
-        timeout=config.agent_zero.timeout_seconds,
+        timeout=config.agent_zero.timeout,
     )
+    timeout_log = config.agent_zero.timeout if config.agent_zero.timeout else "infinite"
     logger.info(
-        "A0 client initialized (base_url: %s, timeout: %ds)",
+        "A0 client initialized (base_url: %s, timeout: %s)",
         config.agent_zero.base_url,
-        config.agent_zero.timeout_seconds,
+        timeout_log,
     )
 
     # Initialize bot and dispatcher

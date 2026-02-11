@@ -30,8 +30,11 @@ class AgentZeroConfig(BaseModel):
     default_project: str | None = None  # Deprecated: use fixed_project_name
     fixed_project_name: str | None = None  # All messages go to this project
     fixed_context_id: str | None = None  # If set, use this context; else auto-create
-    timeout_seconds: int = 300
+    timeout: int | None = None  # Seconds to wait for A0 response. None = wait indefinitely
     lifetime_hours: int = 24
+
+    # Deprecated: use timeout instead
+    timeout_seconds: int | None = None
 
     @computed_field  # type: ignore[prop-decorator]
     @property
@@ -99,7 +102,7 @@ def save(path: str | Path, config: BotConfig) -> None:
         config: The configuration to persist.
     """
     path = Path(path)
-    data = config.model_dump(mode="json", exclude={"agent_zero": {"base_url"}})
+    data = config.model_dump(mode="json", exclude={"agent_zero": {"base_url", "timeout_seconds"}})
 
     dir_ = path.parent
     dir_.mkdir(parents=True, exist_ok=True)
